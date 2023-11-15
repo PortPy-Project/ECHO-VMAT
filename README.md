@@ -1,3 +1,7 @@
+<h1 align="center">
+  <img src="./images/ECHO-VMAT.png" width=70% height="40%">
+</h1>
+
 # ECHO-VMAT
 ECHO, which stands for **E**xpedited **C**onstrained **H**ierarchical **O**ptimization, is an internal automated treatment planning tool developed by our team. As of now, ECHO for Intensity-Modulated Radiation Therapy (IMRT) has been clinically employed to treat over 8,000 patients and remains a critical tool in our daily clinical operations. We have recently extended ECHO's capabilities to encompass Volumetric Modulated Arc Therapy (VMAT), and this extension is currently being utilized in clinical practice.
 
