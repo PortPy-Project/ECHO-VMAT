@@ -1,0 +1,254 @@
+{
+  "steps": {
+	  "1": {
+		  "prescription_gy": 60,
+		  "objective_functions": [
+			  {
+				  "type": "quadratic-overdose",
+				  "structure_name": "PTV_MINUS_CTV",
+				  "structure_def": "PTV - CTV",
+				  "weight": 50000,
+				  "is_target": 1,
+				  "dose_perc": 100
+			  },
+			  {
+				  "type": "quadratic-overdose",
+				  "structure_name": "PTV_MINUS_GTV",
+				  "structure_def": "PTV - GTV",
+				  "weight": 50000,
+				  "is_target": 1,
+				  "dose_perc": 100
+			  },
+			  {
+				  "type": "quadratic-overdose",
+				  "structure_name": "CTV",
+				  "weight": 5000,
+				  "is_target": 1,
+				  "dose_perc": 100
+			  },
+			  {
+				  "type": "quadratic-overdose",
+				  "structure_name": "GTV",
+				  "weight": 5000,
+				  "is_target": 1,
+				  "dose_perc": 100
+			  },
+			  {
+				  "type": "quadratic-underdose",
+				  "structure_name": "CTV",
+				  "weight": 150000,
+				  "is_target": 1,
+				  "dose_perc": 100
+			  },
+			  {
+				  "type": "quadratic-underdose",
+				  "structure_name": "GTV",
+				  "weight": 150000,
+				  "is_target": 1,
+				  "dose_perc": 100
+			  },
+			  {
+				  "type": "quadratic-underdose",
+				  "structure_name": "PTV_MINUS_CTV",
+				  "structure_def": "PTV - CTV",
+				  "weight": 100000,
+				  "is_target": 1,
+				  "dose_perc": 100
+			  },
+			  {
+				  "type": "quadratic-underdose",
+				  "structure_name": "PTV_MINUS_GTV",
+				  "structure_def": "PTV - GTV",
+				  "weight": 100000,
+				  "is_target": 1,
+				  "dose_perc": 100
+			  },
+			  {
+				  "type": "aperture_regularity_quadratic",
+				  "weight": 1000
+			  },
+			  {
+				  "type": "aperture_similarity_quadratic",
+				  "weight": 1000
+			  }
+		  ],
+		  "constraints": [
+		  {
+		  "type": "NTO",
+		  "parameters": {
+			"structure_name": "PTV",
+			"distance_from_structure_mm": [0, 5, 10, 20, 30, 50, 500]
+		  },
+		  "constraints": {
+			"limit_dose_perc": [110, 105, 100, 90, 80, 70, 60]
+		  }
+    	  }
+		  ]
+	  },
+	  "2": {
+		  "prescription_gy": 60,
+		  "objective_functions": [
+	{
+		"type": "quadratic",
+		"structure_name": "CORD",
+        "weight": 10
+    },
+    {
+		"type": "quadratic",
+		"structure_name": "ESOPHAGUS",
+        "weight": 20
+    },
+	{
+		"type": "quadratic",
+		"structure_name": "HEART",
+        "weight": 20
+    },
+	{
+		"type": "quadratic",
+		"structure_name": "LUNG_L",
+        "weight": 10
+    },
+	{
+		"type": "quadratic",
+		"structure_name": "LUNG_R",
+        "weight": 10
+    },
+	{
+		"type": "quadratic",
+		"structure_name": "LUNGS_NOT_GTV",
+		"structure_def": "(LUNG_L | LUNG_R) - GTV",
+        "weight": 10
+    },
+	{
+	  "type": "quadratic-overdose",
+	  "structure_name": "PTV_MINUS_CTV",
+	  "structure_def": "PTV - CTV",
+	  "weight": 50000,
+	  "is_target": 1,
+	  "dose_perc": 100
+	},
+	{
+	  "type": "quadratic-overdose",
+	  "structure_name": "PTV_MINUS_GTV",
+	  "structure_def": "PTV - GTV",
+	  "weight": 50000,
+	  "is_target": 1,
+	  "dose_perc": 100
+	},
+	{
+	  "type": "quadratic-overdose",
+	  "structure_name": "CTV",
+	  "weight": 5000,
+	  "is_target": 1,
+	  "dose_perc": 100
+	},
+	{
+	  "type": "quadratic-overdose",
+	  "structure_name": "GTV",
+	  "weight": 5000,
+	  "is_target": 1,
+	  "dose_perc": 100
+	},
+	{
+	  "type": "quadratic-underdose",
+	  "structure_name": "CTV",
+	  "weight": 150000,
+	  "is_target": 1,
+	  "dose_perc": 100
+	},
+	{
+	  "type": "quadratic-underdose",
+	  "structure_name": "GTV",
+	  "weight": 150000,
+	  "is_target": 1,
+	  "dose_perc": 100
+	},
+	{
+	  "type": "quadratic-underdose",
+	  "structure_name": "PTV_MINUS_CTV",
+	  "structure_def": "PTV - CTV",
+	  "weight": 100000,
+	  "is_target": 1,
+	  "dose_perc": 100
+	},
+	{
+	  "type": "quadratic-underdose",
+	  "structure_name": "PTV_MINUS_GTV",
+	  "structure_def": "PTV - GTV",
+	  "weight": 100000,
+	  "is_target": 1,
+	  "dose_perc": 100
+	},
+	{
+	  "type": "aperture_regularity_quadratic",
+	  "weight": 1000
+	},
+	{
+	  "type": "aperture_similarity_quadratic",
+	  "weight": 1000
+	},
+    {
+	    "type": "NTO",
+		"structure_name": "PTV",
+		"objective_type": "linear",
+	    "weight": 					  [50, 50, 50, 50, 50, 50, 50],
+		"distance_from_structure_mm": [0, 5, 10, 20, 30, 50, 500],
+		"limit_dose_perc": [110, 105, 100, 90, 80, 70, 60]
+    }
+	],
+	"constraints":[
+	{
+		  "type": "NTO",
+		  "parameters": {
+			"structure_name": "PTV",
+			"distance_from_structure_mm": [0, 5, 10, 20, 30, 50, 500]
+		  },
+		  "constraints": {
+			"limit_dose_perc": [110, 105, 100, 90, 80, 70, 60]
+		  }
+    }
+	]
+	  }
+  },
+	"opt_parameters":{
+	"minimum_dynamic_leaf_gap_mm": 0.5,
+    "initial_leaf_pos": "random",
+    "flag_cvxpy": 1,
+    "is_corr": 0,
+    "initial_step_size": 0,
+    "step_size_increment": 1,
+    "ss_termination": 1,
+    "step_size_f": 0,
+    "step_size_b": 0,
+    "min_dynamic_leaf_gap_beamlet": 1.01,
+    "termination_gap": 2,
+    "min_iteration_threshold": 10,
+    "dose_threshold": 0.0001,
+    "mu_min": 0.001,
+    "epsilon_mu": 1e-06,
+    "forward_backward": 1,
+    "total_iter_step1": 0,
+    "flag_end_of_runs": 0,
+    "last_beam_ratio": 1,
+    "flag_lagr": 0,
+    "step1_obj": 1,
+    "step1_oar_dose": 1,
+    "step2_oar_weight": 1,
+    "step2_oar_weight_lb": 1,
+    "step2_oar_weight_ub": 5,
+    "d_od_u": 0,
+    "flag_sampling": 0,
+    "end_of_step1": 0,
+	"first_beam_adj": 0,
+    "second_beam_adj": 0.5,
+    "last_beam_adj": 1,
+    "flag_step0": 0,
+    "frac_over": 1,
+    "frac_under": 1,
+    "w_ai_obj": 10,
+    "w_as_obj": 20,
+	"is_bev": 0,
+	"dvh1": 0.2,
+	"dvh2": 1.7
+	}
+}
