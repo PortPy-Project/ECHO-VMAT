@@ -48,7 +48,7 @@ With some assumptions, one can formulate the problem as a **Mixed Integer Progra
 In our papers ([PMB’2021](https://iopscience.iop.org/article/10.1088/1361-6560/abee58), [PMB’2023](https://iopscience.iop.org/article/10.1088/1361-6560/ace09e/meta)), we proposed an algorithm to solve the non-convex VMAT problem by breaking it down into a sequence of convex problems, hence the name **sequential convex programming**. The key idea is to derive a convex approximation by limiting the leaf motions at each iteration, defining the search space, and merging neighboring beamlets within this search space to create the approximation (see the figure below).
 
 <p align="center">
-<img src="./images/VMAT-SCP-main-idea.PNG" width="80%" height="50%">
+<img src="./images/VMAT-SCP-main-idea.png" width="80%" height="50%">
 <p>
   
 (**Top-left figure**) The grey and white areas represent closed and open beamlets, respectively. The regions framed by red dashed lines indicate the search space within which the leaves can move (the search space consists of two beamlets in this example). (**Top-right figure**) The white beamlets outside the search space will remain open in the next iteration with the same intensity. These can be merged into a single beamlet called an interior beamlet (green area), whose intensity (η) will be optimized as a decision variable. For each pair of neighboring beamlets within the search space (i.e., inside the red frame), we assume they contribute equally (this is our approximation). These pairs can be merged into a boundary beamlet (blue area), whose intensity will be optimized as a decision variable while ensuring it is less than η. If the optimal intensity of a boundary beamlet becomes zero, we will close that beamlet in the next iteration. If it becomes η, we will open it, and if the intensity is in between, we will partially open it. The algorithm also iteratively changes the search space (see our paper for more details). 
@@ -57,7 +57,7 @@ In our papers ([PMB’2021](https://iopscience.iop.org/article/10.1088/1361-6560
 To evaluate the performance of the algorithm, we compared its results to the global optimal solution obtained by solving the computationally intensive Mixed Integer Programming (MIP) problem on a small prostate case.
 
 <p align="center">
-<img src="./images/VMAT-SCP-Global.PNG" width="80%" height="50%">
+<img src="./images/VMAT-SCP-Global.png" width="80%" height="50%">
 <p>
 
 The above figure illustrates that our algorithm can identify optimal solutions that are close to the global optimal solution.
@@ -65,7 +65,7 @@ The above figure illustrates that our algorithm can identify optimal solutions t
 We have also retrospectively compared the automated VMAT plans with the manually generated VMAT plans used for patient treatment for 60 patients across three different disease sites (paraspinal, oligometastatic, lung). Below are the results for 20 lung patients.
 
 <p align="center">
-<img src="./images/VMAT-SCP-Lung.PNG" width="80%" height="50%">
+<img src="./images/VMAT-SCP-Lung.png" width="80%" height="50%">
 <p>
 
 The above figure demonstrates that the automatically generated VMAT plans are superior to or comparable with the manually generated plans in terms of tumor coverage and healthy tissue sparing.
