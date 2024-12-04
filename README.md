@@ -65,7 +65,7 @@ The above figure illustrates that our algorithm can identify optimal solutions t
 We have also retrospectively compared the automated VMAT plans with the manually generated VMAT plans used for patient treatment for 60 patients across three different disease sites (paraspinal, oligometastatic, lung). Below are the results for 20 lung patients.
 
 <p align="center">
-<img src="./images/VMAT-SCP-Paraspinal.png" width="80%" height="50%">
+<img src="./images/VMAT-SCP-Lung_rev1.png" width="80%" height="50%">
 <p>
 
 The above figure demonstrates that the automatically generated VMAT plans are superior to or comparable with the manually generated plans in terms of tumor coverage and healthy tissue sparing.
