@@ -1163,7 +1163,7 @@ class EchoVmatOptimization(Optimization):
         dO = cp.Variable(oar_voxels.shape[0], pos=True)
         constraints += [(inf_int[oar_voxels, :] @ cp.multiply(int_v, map_adj_int) + inf_bound_l[oar_voxels, :] @ cp.multiply(bound_v_l, map_adj_bound)
                          + inf_bound_r[oar_voxels, :] @ cp.multiply(bound_v_r, map_adj_bound) + final_dose_1d[oar_voxels] - opt_dose_1d[oar_voxels]) <= pred_dose_1d[oar_voxels] / num_fractions + dO]
-        obj += [(1 / dO.shape[0]) * cp.sum_squares(dO)]
+        obj += [1*(1 / dO.shape[0]) * cp.sum_squares(dO)]
         obj += [0.0001 * (1 / dO.shape[0]) * cp.sum_squares(inf_int[oar_voxels, :] @ cp.multiply(int_v, map_adj_int) + inf_bound_l[oar_voxels, :] @ cp.multiply(bound_v_l, map_adj_bound)
                                                             + inf_bound_r[oar_voxels, :] @ cp.multiply(bound_v_r, map_adj_bound) + final_dose_1d[oar_voxels] - opt_dose_1d[oar_voxels])]
 
@@ -1175,7 +1175,7 @@ class EchoVmatOptimization(Optimization):
 
         apt_sim_m = self.cvxpy_params['apt_sim_m']
         card_as = self.cvxpy_params['card_as']
-        weight = 1 * (my_plan.get_prescription() / my_plan.get_num_of_fractions())
+        weight = 1* (my_plan.get_prescription() / my_plan.get_num_of_fractions())
         obj += [weight / card_as * (cp.sum(cp.sum_squares(apt_sim_m @ leaf_pos_mu_l)) + cp.sum(
             cp.sum_squares(apt_sim_m @ leaf_pos_mu_r)))]
 
@@ -1222,14 +1222,14 @@ class EchoVmatOptimization(Optimization):
         all_vox = np.arange(m)
         oar_voxels = all_vox[~np.isin(np.arange(m), ptv_vox)]
 
-        ptv_obj = 100*(1 / len(ptv_vox)) * np.sum((sol['act_dose_v'][ptv_vox] - (pred_dose_1d[ptv_vox] / num_fractions)) ** 2)
-        ptv_obj1 = 0.1 * (1 / len(ptv_vox)) * np.sum((sol['act_dose_v'][ptv_vox] - (self.my_plan.get_prescription() / num_fractions)) ** 2)
-        oar_obj = (1 / len(oar_voxels)) * np.sum(np.maximum(sol['act_dose_v'][oar_voxels] - (pred_dose_1d[oar_voxels] / num_fractions), 0)** 2)
-        oar_obj1 = 0.0001*(1 / len(oar_voxels)) * np.sum(np.maximum(sol['act_dose_v'][oar_voxels] - (pred_dose_1d[oar_voxels] / num_fractions), 0) ** 2)
-        apt_reg_obj = self.obj[2].value
-        apt_sim_obj = self.obj[3].value
-        similar_mu_obj = self.obj[4].value
-        sol['actual_obj_value'] = np.round((ptv_obj + ptv_obj1 + oar_obj1 + oar_obj + apt_reg_obj + apt_sim_obj + similar_mu_obj), 4)
+        sol['ptv_obj'] = 100*(1 / len(ptv_vox)) * np.sum((sol['act_dose_v'][ptv_vox] - (pred_dose_1d[ptv_vox] / num_fractions)) ** 2)
+        sol['ptv_obj1'] = 0.1 * (1 / len(ptv_vox)) * np.sum((sol['act_dose_v'][ptv_vox] - (self.my_plan.get_prescription() / num_fractions)) ** 2)
+        sol['oar_obj'] = 1*(1 / len(oar_voxels)) * np.sum(np.maximum(sol['act_dose_v'][oar_voxels] - (pred_dose_1d[oar_voxels] / num_fractions), 0)** 2)
+        sol['oar_obj1'] = 0.0001*(1 / len(oar_voxels)) * np.sum(sol['act_dose_v'][oar_voxels] ** 2)
+        sol['apt_reg_obj'] = self.obj[4].value
+        sol['apt_sim_obj'] = self.obj[5].value
+        sol['similar_mu_obj'] = self.obj[6].value
+        sol['actual_obj_value'] = np.round(sol['ptv_obj'] + sol['ptv_obj1'] + sol['oar_obj'] + sol['oar_obj1'], 4) #+ sol['apt_reg_obj'] + sol['apt_sim_obj'] + sol['similar_mu_obj']), 4)
         return sol
 
     def run_sequential_cvx_algo_prediction(self, pred_dose_1d, *args, **kwargs):
@@ -1258,6 +1258,8 @@ class EchoVmatOptimization(Optimization):
             sol = self.arcs.calculate_dose(inf_matrix=self.inf_matrix, sol=sol, vmat_params=vmat_params, best_plan=False)
             sol = self.calc_actual_objective_value_prediction(sol, pred_dose_1d=pred_dose_1d)
 
+            # save the current arcs containing leaf positions and mu to solution
+            sol['arcs'] = deepcopy(self.arcs.arcs_dict['arcs'])
             if inner_iteration == 0:
 
                 intial_step_size = int(np.maximum(3, np.ceil(self.arcs.get_max_cols() / 4)))
@@ -1348,7 +1350,8 @@ class EchoVmatOptimization(Optimization):
             sol['act_dose_v'] = sol['act_dose_v'] + final_dose_1d - opt_dose_1d
             sol['int_dose_v'] = sol['int_dose_v'] + final_dose_1d - opt_dose_1d
             sol = self.calc_actual_objective_value_prediction(sol, pred_dose_1d=pred_dose_1d)
-
+            # save the current arcs containing leaf positions and mu to solution
+            sol['arcs'] = deepcopy(self.arcs.arcs_dict['arcs'])
             if inner_iteration == 0:
 
                 self.arcs.update_leaf_pos(forward_backward=vmat_params['forward_backward'])
@@ -1429,6 +1432,8 @@ class EchoVmatOptimization(Optimization):
             sol = self.calc_actual_objective_value(sol)
 
             sol = self.resolve_infeasibility_of_actual_solution(sol=sol, *args, **kwargs)
+            # save the current arcs containing leaf positions and mu to solution
+            sol['arcs'] = deepcopy(self.arcs.arcs_dict['arcs'])
 
             if inner_iteration == 0:
                 if self.step_num == 2:
@@ -1506,7 +1511,8 @@ class EchoVmatOptimization(Optimization):
             sol = self.calc_actual_objective_value(sol)
 
             sol = self.resolve_infeasibility_of_actual_solution(sol=sol, *args, **kwargs)
-
+            # save the current arcs containing leaf positions and mu to solution
+            sol['arcs'] = deepcopy(self.arcs.arcs_dict['arcs'])
             if inner_iteration == 0:
                 if self.step_num == 2:
                     self.arcs.update_leaf_pos(forward_backward=vmat_params['forward_backward'])
