@@ -74,7 +74,7 @@
 		  ],
 		  "constraints": [
 		  {
-		  "type": "NTO",
+		  "type": "DFO",
 		  "parameters": {
 			"structure_name": "PTV",
 			"distance_from_structure_mm": [0, 5, 10, 20, 30, 50, 500]
@@ -188,7 +188,7 @@
 	  "weight": 1000
 	},
     {
-	    "type": "NTO",
+	    "type": "DFO",
 		"structure_name": "PTV",
 		"objective_type": "linear",
 	    "weight": 					  [50, 50, 50, 50, 50, 50, 50],
@@ -198,7 +198,7 @@
 	],
 	"constraints":[
 	{
-		  "type": "NTO",
+		  "type": "DFO",
 		  "parameters": {
 			"structure_name": "PTV",
 			"distance_from_structure_mm": [0, 5, 10, 20, 30, 50, 500]
@@ -212,7 +212,7 @@
   },
 	"opt_parameters":{
 	"minimum_dynamic_leaf_gap_mm": 0.5,
-    "initial_leaf_pos": "random",
+    "initial_leaf_pos": "CG",
     "flag_cvxpy": 1,
     "is_corr": 0,
     "initial_step_size": 0,
@@ -249,6 +249,8 @@
     "w_as_obj": 20,
 	"is_bev": 0,
 	"dvh1": 0.2,
-	"dvh2": 1.7
+	"dvh2": 1.7,
+    "smooth_delta": 0.02,
+	"normalize_oar_weights": 1
 	}
 }

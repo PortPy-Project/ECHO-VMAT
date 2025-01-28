@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import pandas as pd
 from portpy.photon import Optimization
-from typing import List, TYPE_CHECKING, Union
+from typing import TYPE_CHECKING
 import time
 
 if TYPE_CHECKING:
@@ -11,22 +10,21 @@ if TYPE_CHECKING:
 from portpy.photon.clinical_criteria import ClinicalCriteria
 import cvxpy as cp
 import numpy as np
-import scipy as sp
-import scipy.sparse as sparse
+
 from scipy.interpolate import interp1d
 from copy import deepcopy
 from scipy.spatial import cKDTree
-import os
 
 # import for different prescription
 from scipy.ndimage import binary_erosion, label
 from sklearn.neighbors import NearestNeighbors
 
+
 class EchoVmatOptimization(Optimization):
     def __init__(self, my_plan: Plan, arcs=None, inf_matrix: InfluenceMatrix = None,
                  clinical_criteria: ClinicalCriteria = None,
                  opt_params: dict = None, vars: dict = None, sol=None, step_num: int = None,
-                 is_corr: bool = False, de_norm: np.ndarray = None, do_norm:np.ndarray = None):
+                 is_corr: bool = False, delta: np.ndarray = None):
         # Call the constructor of the base class (Optimization) using super()
         super().__init__(my_plan=my_plan, inf_matrix=inf_matrix,
                          clinical_criteria=clinical_criteria,
@@ -50,13 +48,14 @@ class EchoVmatOptimization(Optimization):
         self.obj_actual = []
         self.constraints_actual = []
         self.is_corr = is_corr
-        if de_norm is None:
-            self.de_norm = np.zeros(self.inf_matrix.A.shape[0])
-            self.do_norm = np.zeros(self.inf_matrix.A.shape[0])
+        if delta is None:
+            self.delta = np.zeros(self.inf_matrix.A.shape[0])
         else:
-            self.de_norm = de_norm
-            self.do_norm = do_norm
+            self.delta = delta
             self.is_corr = True
+        self.inf_int = None
+        self.inf_bound_l = None
+        self.inf_bound_r = None
 
     def set_step_num(self, step_num):
         self.step_num = step_num
@@ -73,20 +72,15 @@ class EchoVmatOptimization(Optimization):
         A = inf_matrix.A
         opt_params = self.opt_params
         clinical_criteria = self.clinical_criteria
+        inf_int = self.inf_int
+        inf_bound_l = self.inf_bound_l
+        inf_bound_r = self.inf_bound_r
         self.obj = []
         self.constraints = []
         obj = self.obj
         constraints = self.constraints
-        de_norm = self.de_norm
-        do_norm = self.do_norm
-        if self.outer_iteration == 0:
-            self.create_cvx_params()
 
         t = time.time()
-        flag_fast_inf_matrix = False
-        inf_int, inf_bound_l, inf_bound_r = self.create_interior_and_boundary_inf_matrix()
-        elapsed = time.time() - t
-        print('Elapsed time (influence matrix modification):{}'.format(elapsed))
 
         # get interior and boundary beamlets properties in matrix form
         map_int_v = self.cvxpy_params['map_int_v']
@@ -146,7 +140,7 @@ class EchoVmatOptimization(Optimization):
                         self.vars[dO] = cp.Variable(len(voxels), pos=True)
                         obj += [(1 / cp.sum(voxels_vol_cc)) * (obj_funcs[i]['weight'] * (1/frac_over) * cp.sum_squares(cp.multiply(cp.sqrt(voxels_vol_cc), self.vars[dO])))]
                         constraints += [inf_int[voxels, :] @ cp.multiply(int_v, map_adj_int) + inf_bound_l[voxels, :] @ cp.multiply(bound_v_l, map_adj_bound)
-                                        + inf_bound_r[voxels, :] @ cp.multiply(bound_v_r, map_adj_bound) + (de_norm[voxels]-do_norm[voxels]) <= np.round(dose_gy, 4) + self.vars[dO]]
+                                        + inf_bound_r[voxels, :] @ cp.multiply(bound_v_r, map_adj_bound) + self.delta[voxels] <= np.round(dose_gy, 4) + self.vars[dO]]
                         print('Objective function type: {} , structure:{}, dose_gy:{}, weight:{} created..'.format(
                             obj_funcs[i]['type'], struct, np.min(dose_gy), obj_funcs[i]['weight']))
                     elif obj_funcs[i]['type'] == 'quadratic-underdose':
@@ -155,7 +149,7 @@ class EchoVmatOptimization(Optimization):
                         self.vars[dU] = cp.Variable(len(st.get_opt_voxels_idx(struct)), pos=True)
                         obj += [(1 / cp.sum(voxels_vol_cc)) * (obj_funcs[i]['weight'] * (1/frac_under)* cp.sum_squares(cp.multiply(cp.sqrt(voxels_vol_cc), self.vars[dU])))]
                         constraints += [inf_int[voxels, :] @ cp.multiply(int_v, map_adj_int) + inf_bound_l[voxels, :] @ cp.multiply(
-                            bound_v_l, map_adj_bound) + inf_bound_r[voxels, :] @ cp.multiply(bound_v_r, map_adj_bound) + (de_norm[voxels]-do_norm[voxels]) >= np.round(dose_gy, 4) - self.vars[dU]]
+                            bound_v_l, map_adj_bound) + inf_bound_r[voxels, :] @ cp.multiply(bound_v_r, map_adj_bound) + self.delta[voxels] >= np.round(dose_gy, 4) - self.vars[dU]]
                         print('Objective function type: {} , structure:{}, dose_gy:{}, weight:{} created..'.format(
                             obj_funcs[i]['type'], struct, np.min(dose_gy), obj_funcs[i]['weight']))
             elif obj_funcs[i]['type'] == 'quadratic':
@@ -166,7 +160,7 @@ class EchoVmatOptimization(Optimization):
                     voxels = st.get_opt_voxels_idx(struct)
                     voxels_vol_cc = st.get_opt_voxels_volume_cc(struct)
                     obj += [(1 / cp.sum(voxels_vol_cc)) * (self.vmat_params['step2_oar_weight']*obj_funcs[i]['weight'] * cp.sum_squares(cp.multiply(cp.sqrt(voxels_vol_cc), inf_int[voxels, :] @ cp.multiply(int_v, map_adj_int) + inf_bound_l[voxels, :] @ cp.multiply(
-                            bound_v_l, map_adj_bound) + inf_bound_r[voxels, :] @ cp.multiply(bound_v_r, map_adj_bound) + (de_norm[voxels]-do_norm[voxels]))))]
+                            bound_v_l, map_adj_bound) + inf_bound_r[voxels, :] @ cp.multiply(bound_v_r, map_adj_bound) + self.delta[voxels])))]
                     print('Objective function type: {}, structure:{}, weight:{} created..'.format(obj_funcs[i]['type'], struct, obj_funcs[i]['weight']))
             elif obj_funcs[i]['type'] == 'aperture_regularity_quadratic':
                 apt_reg_m = self.cvxpy_params['apt_reg_m']
@@ -190,11 +184,11 @@ class EchoVmatOptimization(Optimization):
                     self.vars[dO] = cp.Variable(len(oar_voxels), pos=True)
                     obj += [(1 / len(oar_voxels)) * self.vmat_params['step2_oar_weight'] * weight.T @ self.vars[dO]]
                     constraints += [inf_int[oar_voxels, :] @ cp.multiply(int_v, map_adj_int) + inf_bound_l[oar_voxels, :] @ cp.multiply(
-                                bound_v_l, map_adj_bound) + inf_bound_r[oar_voxels, :] @ cp.multiply(bound_v_r, map_adj_bound) + (de_norm[oar_voxels]-do_norm[oar_voxels]) <= dfo / num_fractions + self.vars[dO]]
+                                bound_v_l, map_adj_bound) + inf_bound_r[oar_voxels, :] @ cp.multiply(bound_v_r, map_adj_bound) + self.delta[oar_voxels] <= dfo / num_fractions + self.vars[dO]]
                     print('Objective function type: {}, weight:{} created..'.format(obj_funcs[i]['type'], obj_funcs[i]['weight']))
                 elif obj_funcs[i]["objective_type"] == "quadratic":
                     obj += [(1 / len(oar_voxels)) * self.vmat_params['step2_oar_weight'] * cp.sum_squares(cp.multiply(cp.sqrt(weight), (inf_int[oar_voxels, :] @ cp.multiply(int_v, map_adj_int) + inf_bound_l[oar_voxels, :] @ cp.multiply(
-                            bound_v_l, map_adj_bound) + inf_bound_r[oar_voxels, :] @ cp.multiply(bound_v_r, map_adj_bound) + (de_norm[oar_voxels]-do_norm[oar_voxels]))))]
+                            bound_v_l, map_adj_bound) + inf_bound_r[oar_voxels, :] @ cp.multiply(bound_v_r, map_adj_bound) + self.delta[oar_voxels])))]
 
                     print('Objective function type: {}-{}, weight:{} created..'.format(obj_funcs[i]['type'], obj_funcs[i]["objective_type"], obj_funcs[i]['weight']))
             elif obj_funcs[i]['type'] == 'similar_mu_linear':
@@ -264,7 +258,7 @@ class EchoVmatOptimization(Optimization):
                     if limit_key:
                         limit = self.dose_to_gy(limit_key, constraint_def[i]['constraints'][limit_key])
                         constraints += [inf_int[voxels, :] @ cp.multiply(int_v, map_adj_int) + inf_bound_l[voxels, :] @ cp.multiply(
-                            bound_v_l, map_adj_bound) + inf_bound_r[voxels, :] @ cp.multiply(bound_v_r, map_adj_bound) + (de_norm[voxels]-do_norm[voxels]) <= limit / num_fractions]
+                            bound_v_l, map_adj_bound) + inf_bound_r[voxels, :] @ cp.multiply(bound_v_r, map_adj_bound) + self.delta[voxels] <= limit / num_fractions]
                         print('Constraint type: {}, structure:{}, limit_gy:{} created..'.format(constraint_def[i]['type'], org, limit / num_fractions))
                     if goal_key and self.step_num == 2:
                         goal = self.dose_to_gy(goal_key, constraint_def[i]['constraints'][goal_key])
@@ -273,7 +267,7 @@ class EchoVmatOptimization(Optimization):
                         weight = constraint_def[i]['parameters']['weight']
                         obj += [(1 / len(voxels)) * self.vmat_params['step2_oar_weight']*weight * cp.sum(self.vars[dO])]
                         constraints += [inf_int[voxels, :] @ cp.multiply(int_v, map_adj_int) + inf_bound_l[voxels, :] @ cp.multiply(
-                            bound_v_l, map_adj_bound) + inf_bound_r[voxels, :] @ cp.multiply(bound_v_r, map_adj_bound) + (de_norm[voxels]-do_norm[voxels]) <= goal / num_fractions + self.vars[dO]]
+                            bound_v_l, map_adj_bound) + inf_bound_r[voxels, :] @ cp.multiply(bound_v_r, map_adj_bound) + self.delta[voxels] <= goal / num_fractions + self.vars[dO]]
                         print('Constraint type: {}, structure:{}, goal_gy:{} created..'.format(constraint_def[i]['type'], org, goal / num_fractions))
             elif constraint_def[i]['type'] == 'mean_dose':
                 org = constraint_def[i]['parameters']['structure_name']
@@ -289,7 +283,7 @@ class EchoVmatOptimization(Optimization):
                         limit = self.dose_to_gy(limit_key, constraint_def[i]['constraints'][limit_key])
                         limit = limit / fraction_of_vol_in_calc_box  # modify limit due to fraction of volume receiving no dose
                         constraints += [(1 / sum(voxels_cc)) * (cp.sum((cp.multiply(voxels_cc, inf_int[voxels, :] @ cp.multiply(int_v, map_adj_int) + inf_bound_l[voxels, :] @ cp.multiply(
-                                bound_v_l, map_adj_bound) + inf_bound_r[voxels, :] @ cp.multiply(bound_v_r, map_adj_bound) + (de_norm[voxels]-do_norm[voxels]))))) <= limit / num_fractions]
+                                bound_v_l, map_adj_bound) + inf_bound_r[voxels, :] @ cp.multiply(bound_v_r, map_adj_bound) + self.delta[voxels])))) <= limit / num_fractions]
                         print('Constraint type: {}, structure:{}, limit_gy:{} created..'.format(constraint_def[i]['type'], org, limit / num_fractions))
                     if goal_key and self.step_num == 2:
                         goal = self.dose_to_gy(goal_key, constraint_def[i]['constraints'][goal_key])
@@ -299,12 +293,12 @@ class EchoVmatOptimization(Optimization):
                         weight = constraint_def[i]['parameters']['weight']
                         obj += [weight * self.vmat_params['step2_oar_weight']*self.vars[dO]]
                         constraints += [(1 / sum(voxels_cc)) * (cp.sum((cp.multiply(voxels_cc, inf_int[voxels, :] @ cp.multiply(int_v, map_adj_int) + inf_bound_l[voxels, :] @ cp.multiply(
-                                bound_v_l, map_adj_bound) + inf_bound_r[voxels, :] @ cp.multiply(bound_v_r, map_adj_bound) + (de_norm[voxels]-do_norm[voxels]))))) <= goal / num_fractions + self.vars[dO]]
+                                bound_v_l, map_adj_bound) + inf_bound_r[voxels, :] @ cp.multiply(bound_v_r, map_adj_bound) + self.delta[voxels])))) <= goal / num_fractions + self.vars[dO]]
                         print('Constraint type: {}, structure:{}, goal_gy:{} created..'.format(constraint_def[i]['type'], org, goal / num_fractions))
             elif constraint_def[i]['type'] == 'DFO':
                 dfo, oar_voxels = self.get_dfo_parameters(dfo_dict=constraint_def[i], is_obj=False)
                 constraints += [inf_int[oar_voxels, :] @ cp.multiply(int_v, map_adj_int) + inf_bound_l[oar_voxels, :] @ cp.multiply(
-                                bound_v_l, map_adj_bound) + inf_bound_r[oar_voxels, :] @ cp.multiply(bound_v_r, map_adj_bound) + (de_norm[oar_voxels]-do_norm[oar_voxels]) <= dfo / num_fractions]
+                                bound_v_l, map_adj_bound) + inf_bound_r[oar_voxels, :] @ cp.multiply(bound_v_r, map_adj_bound) + self.delta[oar_voxels] <= dfo / num_fractions]
                 print('Constraint type: {} created..'.format(constraint_def[i]['type']))
 
         if not self.clinical_criteria.dvh_table.empty:
@@ -357,7 +351,7 @@ class EchoVmatOptimization(Optimization):
                         fraction_of_vol_in_calc_box = inf_matrix.get_fraction_of_vol_in_calc_box(org)
                         low_dose_voxels = dvh_table['low_dose_voxels'][ind]
                         constraints += [inf_int[low_dose_voxels, :] @ cp.multiply(int_v, map_adj_int) + inf_bound_l[low_dose_voxels, :] @ cp.multiply(
-                                bound_v_l, map_adj_bound) + inf_bound_r[low_dose_voxels, :] @ cp.multiply(bound_v_r, map_adj_bound) + (de_norm[low_dose_voxels]-do_norm[low_dose_voxels]) <= dose_gy/num_fractions]
+                                bound_v_l, map_adj_bound) + inf_bound_r[low_dose_voxels, :] @ cp.multiply(bound_v_r, map_adj_bound) + self.delta[low_dose_voxels] <= dose_gy/num_fractions]
                         print('Constraint type: dose_volume, structure:{}, limit_gy:{}, volume_perc:{} created..'.format(org, dose_gy, dvh_table['volume_perc'][ind] / fraction_of_vol_in_calc_box))
                     elif dvh_table['dvh_type'][ind] == 'goal' and self.step_num == 2:
                         dose_gy = dvh_table['dose_gy'][ind]
@@ -368,7 +362,7 @@ class EchoVmatOptimization(Optimization):
                         s_dvh_index_stop += len(low_dose_voxels)
                         obj += [weight * 1 / len(low_dose_voxels) * cp.sum(dvh_violation[s_dvh_index_start:s_dvh_index_stop])]
                         constraints += [inf_int[low_dose_voxels, :] @ cp.multiply(int_v, map_adj_int) + inf_bound_l[low_dose_voxels, :] @ cp.multiply(
-                                bound_v_l, map_adj_bound) + inf_bound_r[low_dose_voxels, :] @ cp.multiply(bound_v_r, map_adj_bound) + (de_norm[low_dose_voxels]-do_norm[low_dose_voxels]) <= dose_gy/num_fractions + dvh_violation[s_dvh_index_start:s_dvh_index_stop]]
+                                bound_v_l, map_adj_bound) + inf_bound_r[low_dose_voxels, :] @ cp.multiply(bound_v_r, map_adj_bound) + self.delta[low_dose_voxels] <= dose_gy/num_fractions + dvh_violation[s_dvh_index_start:s_dvh_index_stop]]
                         s_dvh_index_start += len(low_dose_voxels)
                         print('Constraint type: dose_volume, structure:{}, goal_gy:{}, volume_perc:{} created..'.format(org, dose_gy, dvh_table['volume_perc'][ind] / fraction_of_vol_in_calc_box))
         print('Constraints done')
@@ -454,7 +448,7 @@ class EchoVmatOptimization(Optimization):
 
         # Construct actual solution correction problem
 
-        #unpack data
+        # unpack data
         inf_apt = self.create_cvx_params(actual_sol_correction=True)
         total_beams = np.sum([arc['num_beams'] for arc in self.arcs.arcs_dict['arcs']])
         inf_matrix = self.inf_matrix
@@ -583,7 +577,6 @@ class EchoVmatOptimization(Optimization):
                         limit = limit / fraction_of_vol_in_calc_box  # modify limit due to fraction of volume receiving no dose
                         constraints_actual += [(1 / sum(voxels_vol)) * (cp.sum((cp.multiply(voxels_vol, inf_apt[voxels, :] @ beam_mu)))) <= limit / num_fractions]
                         print('Constraint type: {}, limit_gy:{} created..'.format(constraint_def[i]['type'], limit / num_fractions))
-            #TODO Add for DFO
             elif constraint_def[i]['type'] == 'DFO':
                 dfo, oar_voxels = self.get_dfo_parameters(dfo_dict=constraint_def[i], is_obj=False)
                 constraints_actual += [inf_apt[oar_voxels, :] @ beam_mu <= dfo / num_fractions]
@@ -621,7 +614,7 @@ class EchoVmatOptimization(Optimization):
             print('Time for calc distance {}'.format(time.time() - start))
             dist_from_structure = np.zeros_like(all_vox, dtype=float)
             dist_from_structure[oar_voxels] = a
-            self.inf_matrix.opt_voxels_dict['distance_from_structure_mm'] = {struct_name: dist_from_structure}
+            self.inf_matrix.opt_voxels_dict['distance_from_structure_mm'][struct_name] = dist_from_structure
         if not is_obj:
             return dfo_interpolate(self.inf_matrix.opt_voxels_dict['distance_from_structure_mm'][struct_name][oar_voxels]), oar_voxels
         else:
@@ -684,7 +677,7 @@ class EchoVmatOptimization(Optimization):
                 a, b = fit_exponential_growth(np.min(distances_voxels), min_dose, np.max(distances_voxels), max_dose)
 
                 prescription = np.squeeze(a * np.exp(b * distances_voxels))
-                self.clinical_criteria.clinical_criteria_dict['dfo_target_interior'] = {struct_name: prescription}
+                self.inf_matrix.opt_voxels_dict['distance_from_structure_mm'][struct_name] = prescription
                 # self.clinical_criteria.clinical_criteria_dict['dfo_target_interior'] = {struct_name + 'distance_from_boundary_mm': distances_voxels}
             else:
                 prescription = self.clinical_criteria.clinical_criteria_dict['dfo_target_interior'][struct_name]
@@ -744,7 +737,11 @@ class EchoVmatOptimization(Optimization):
                         inf_bound_r[:, row_so_far] = np.sum(A[:, vmat[b]['bound_ind_right'][r]].T, axis=0)
                     row_so_far = row_so_far + 1
         print('Time for creating influence matrix for boundary and interior beamlets {} seconds'.format(time.time() - start))
-        return inf_int, inf_bound_l, inf_bound_r
+        # create influence matrices for boundary and interior beamlets
+        self.inf_int = inf_int
+        self.inf_bound_l = inf_bound_l
+        self.inf_bound_r = inf_bound_r
+        return
 
     def update_params(self, step_number, sol):
         if step_number == 0:
@@ -1105,15 +1102,15 @@ class EchoVmatOptimization(Optimization):
         my_plan = self.my_plan
         inf_matrix = self.inf_matrix
         clinical_criteria = self.clinical_criteria
+        inf_int = self.inf_int
+        inf_bound_l = self.inf_bound_l
+        inf_bound_r = self.inf_bound_r
         self.obj = []
         self.constraints = []
         obj = self.obj
         constraints = self.constraints
         x = self.vars['x']
         m = inf_matrix.A.shape[0]
-        if self.outer_iteration == 0:
-            self.create_cvx_params()
-        inf_int, inf_bound_l, inf_bound_r = self.create_interior_and_boundary_inf_matrix()
 
         # get interior and boundary beamlets properties in matrix form
         map_int_v = self.cvxpy_params['map_int_v']
@@ -1229,7 +1226,7 @@ class EchoVmatOptimization(Optimization):
         sol['apt_reg_obj'] = self.obj[4].value
         sol['apt_sim_obj'] = self.obj[5].value
         sol['similar_mu_obj'] = self.obj[6].value
-        sol['actual_obj_value'] = np.round(sol['ptv_obj'] + sol['ptv_obj1'] + sol['oar_obj'] + sol['oar_obj1'], 4) #+ sol['apt_reg_obj'] + sol['apt_sim_obj'] + sol['similar_mu_obj']), 4)
+        sol['actual_obj_value'] = np.round(sol['ptv_obj'] + sol['ptv_obj1'] + sol['oar_obj'] + sol['oar_obj1'] + sol['apt_reg_obj'] + sol['apt_sim_obj'] + sol['similar_mu_obj'], 4) #+ sol['apt_reg_obj'] + sol['apt_sim_obj'] + sol['similar_mu_obj']), 4)
         return sol
 
     def run_sequential_cvx_algo_prediction(self, pred_dose_1d, *args, **kwargs):
@@ -1244,11 +1241,13 @@ class EchoVmatOptimization(Optimization):
         best_obj_value = 0
         vmat_params = self.vmat_params
         self.arcs.get_initial_leaf_pos(initial_leaf_pos=vmat_params['initial_leaf_pos'])
+        self.create_cvx_params()
         sol_convergence = []
         while True:
 
             self.arcs.gen_interior_and_boundary_beamlets(forward_backward=vmat_params['forward_backward'], step_size_f=vmat_params['step_size_f'], step_size_b=vmat_params['step_size_b'])
             # Optimize using the predicted plan
+            self.create_interior_and_boundary_inf_matrix()
             self.create_cvxpy_intermediate_problem_prediction(pred_dose_1d=pred_dose_1d)
             sol = self.solve(*args, **kwargs)
             sol_convergence.append(sol)
@@ -1340,6 +1339,7 @@ class EchoVmatOptimization(Optimization):
             if self.outer_iteration > 1:
                 self.arcs.gen_interior_and_boundary_beamlets(forward_backward=vmat_params['forward_backward'], step_size_f=vmat_params['step_size_f'], step_size_b=vmat_params['step_size_b'])
             # Optimize using the predicted plan
+            self.create_interior_and_boundary_inf_matrix()
             self.create_cvxpy_intermediate_problem_prediction(pred_dose_1d=pred_dose_1d, final_dose_1d=final_dose_1d, opt_dose_1d=opt_dose_1d)
             sol = self.solve(*args, **kwargs)
             sol_convergence.append(sol)
@@ -1427,8 +1427,8 @@ class EchoVmatOptimization(Optimization):
             # post processing
             self.arcs.calc_actual_from_intermediate_sol(sol)
             sol = self.arcs.calculate_dose(inf_matrix=self.inf_matrix, sol=sol, vmat_params=vmat_params, best_plan=False)
-            sol['act_dose_v'] = sol['act_dose_v'] + (self.de_norm - self.do_norm)
-            sol['int_dose_v'] = sol['int_dose_v'] + (self.de_norm - self.do_norm)
+            sol['act_dose_v'] = sol['act_dose_v'] + self.delta
+            sol['int_dose_v'] = sol['int_dose_v'] + self.delta
             sol = self.calc_actual_objective_value(sol)
 
             sol = self.resolve_infeasibility_of_actual_solution(sol=sol, *args, **kwargs)
@@ -1456,7 +1456,7 @@ class EchoVmatOptimization(Optimization):
                     self.arcs.update_best_solution()
                     self.best_iteration = self.outer_iteration
                     sol = self.arcs.calculate_dose(inf_matrix=self.inf_matrix, sol=sol, vmat_params=vmat_params, best_plan=True)
-                    sol['best_act_dose_v'] = sol['best_act_dose_v'] + self.de_norm - self.do_norm
+                    sol['best_act_dose_v'] = sol['best_act_dose_v'] + self.delta
                     inner_iteration = inner_iteration + 1
 
                     relative_error = (best_obj_value - sol['actual_obj_value']) / best_obj_value * 100
@@ -1496,11 +1496,13 @@ class EchoVmatOptimization(Optimization):
         inner_iteration = int(0)
         best_obj_value = 0
         vmat_params = self.vmat_params
-        if self.step_num < 2:
+        if self.step_num < 2 and not vmat_params['initial_leaf_pos'].lower() == 'cg': # in case if col generation is not used to set initial leaf positions, use input leaf positions (random or BEV)
             self.arcs.get_initial_leaf_pos(initial_leaf_pos=vmat_params['initial_leaf_pos'])
+        self.create_cvx_params()
         sol_convergence = []
         while True:
             self.arcs.gen_interior_and_boundary_beamlets(forward_backward=vmat_params['forward_backward'], step_size_f=vmat_params['step_size_f'], step_size_b=vmat_params['step_size_b'])
+            self.create_interior_and_boundary_inf_matrix()
             self.create_cvxpy_intermediate_problem()
             sol = self.solve(*args, **kwargs)
             sol_convergence.append(sol)

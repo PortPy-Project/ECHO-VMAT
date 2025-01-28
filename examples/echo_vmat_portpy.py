@@ -6,6 +6,7 @@ import time
 import numpy as np
 import portpy.photon as pp
 from echo_vmat.echo_vmat_optimization import EchoVmatOptimization
+from echo_vmat.echo_vmat_optimization_col_gen import EchoVmatOptimizationColGen
 import matplotlib.pyplot as plt
 from echo_vmat.arcs import Arcs
 import pandas as pd
@@ -67,6 +68,29 @@ def echo_vmat_portpy():
     # create a plan using ct, structures, beams and influence matrix. Clinical criteria is optional
     my_plan = pp.Plan(structs=structs, beams=beams, inf_matrix=inf_matrix, clinical_criteria=clinical_criteria, arcs=arcs)
 
+    # generate initial leaf positions using column generation approach else use user defined initial leaf positions
+    if vmat_opt_params['opt_parameters']['initial_leaf_pos'].lower() == 'cg':
+        start_col_gen = time.time()
+        vmat_opt = EchoVmatOptimizationColGen(my_plan=my_plan,
+                                              opt_params=vmat_opt_params,
+                                              step_num=1)
+
+        sol_col_gen = vmat_opt.run_col_gen_algo(solver='MOSEK', verbose=True, accept_unknown=True)
+        dose_1d = inf_matrix.A @ sol_col_gen['optimal_intensity'] * my_plan.get_num_of_fractions()
+        # # plot dvh for the above structures
+        fig, ax = plt.subplots(figsize=(12, 8))
+        struct_names = ['PTV', 'ESOPHAGUS', 'HEART', 'CORD', 'RIND_0', 'RIND_1', 'LUNGS_NOT_GTV', 'RECT_WALL', 'BLAD_WALL',
+                        'URETHRA']
+        ax = pp.Visualization.plot_dvh(my_plan, dose_1d=dose_1d,
+                                       struct_names=struct_names, ax=ax)
+        ax.set_title('Initial Col gen dvh')
+        plt.show(block=False)
+        plt.close('all')
+        # pp.save_optimal_sol(sol=sol_col_gen, sol_name='sol_col_gen', path=r'C:\Temp')
+
+        end_col_gen = time.time()
+        print('***************time to generate initial leaf positions = ', end_col_gen - start_col_gen, 'seconds *****************')
+
     # check if there are dvh constraints and run step 0
     clinical_criteria.get_dvh_table(my_plan=my_plan, opt_params=vmat_opt_params['steps']['2'])
     vmat_opt = EchoVmatOptimization(my_plan=my_plan,
@@ -101,7 +125,7 @@ def echo_vmat_portpy():
     # # plot dvh for the above structures
     fig, ax = plt.subplots(figsize=(12, 8))
     struct_names = ['PTV', 'ESOPHAGUS', 'HEART', 'CORD', 'RIND_0', 'RIND_1', 'LUNGS_NOT_GTV', 'RECT_WALL', 'BLAD_WALL',
-                    'URETHRA']
+                    'URETHRA','LUNG_L', 'LUNG_R']
     title = []
     style = ['-', '--', ':']
     for i in range(len(solutions)):
