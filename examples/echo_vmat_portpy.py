@@ -7,12 +7,13 @@ import numpy as np
 import portpy.photon as pp
 from echo_vmat.echo_vmat_optimization import EchoVmatOptimization
 from echo_vmat.echo_vmat_optimization_col_gen import EchoVmatOptimizationColGen
+from echo_vmat.utils.get_sparse_only import get_sparse_only
 import matplotlib.pyplot as plt
 from echo_vmat.arcs import Arcs
+from copy import deepcopy
 import pandas as pd
 import sys
 import json
-
 
 
 def echo_vmat_portpy():
@@ -28,6 +29,19 @@ def echo_vmat_portpy():
     data = pp.DataExplorer(data_dir=data_dir)
     data.patient_id = 'Lung_Phantom_Patient_1'
 
+    # Load clinical criteri and optimization parameters from the config files. They are located in ./echo_vmat/config_files. Users can modify the clinical criteria and optimization parameters based upon their needs
+    config_path = os.path.join(os.getcwd(), '..', 'echo_vmat', 'config_files')
+    protocol_name = 'Lung_2Gy_30Fx'
+    filename = os.path.join(config_path, protocol_name + '_opt_params.json')
+    vmat_opt_params = data.load_json(file_name=filename)
+
+    filename = os.path.join(config_path, protocol_name + '_clinical_criteria.json')
+    clinical_criteria = pp.ClinicalCriteria(file_name=filename)
+
+    if "flag_full_matrix" in vmat_opt_params['opt_parameters']:
+        flag_full_matrix = vmat_opt_params['opt_parameters']['flag_full_matrix']
+    else:
+        flag_full_matrix = False
     structs = pp.Structures(data)
     # Users can modify the arcs based upon the start and stop gantry angles.
     # Below is an example where 2 arcs area created,
@@ -37,16 +51,7 @@ def echo_vmat_portpy():
                           {'arc_id': "02", "beam_ids": all_beam_ids[int(len(all_beam_ids) / 2):]}]}
 
     beam_ids = [beam_id for arcs_dict in arcs_dict['arcs'] for beam_id in arcs_dict['beam_ids']]
-    beams = pp.Beams(data, beam_ids=beam_ids)
-
-    # Load clinical criteri and optimization parameters from the config files. They are located in ./echo_vmat/config_files. Users can modify the clinical criteria and optimization parameters based upon their needs
-    config_path = os.path.join(os.getcwd(), '..', 'echo_vmat', 'config_files')
-    protocol_name = 'Lung_2Gy_30Fx'
-    filename = os.path.join(config_path, protocol_name + '_opt_params.json')
-    vmat_opt_params = data.load_json(file_name=filename)
-
-    filename = os.path.join(config_path, protocol_name + '_clinical_criteria.json')
-    clinical_criteria = pp.ClinicalCriteria(file_name=filename)
+    beams = pp.Beams(data, beam_ids=beam_ids, load_inf_matrix_full=flag_full_matrix)
 
     if 'Patient Surface' in structs.get_structures():
         ind = structs.structures_dict['name'].index('Patient Surface')
@@ -61,12 +66,44 @@ def echo_vmat_portpy():
         structs.create_opt_structures(opt_params=vmat_opt_params["steps"][str(i + 1)],
                                       clinical_criteria=clinical_criteria)
 
-    inf_matrix = pp.InfluenceMatrix(structs=structs, beams=beams)  # is_bev=True
+    inf_matrix = pp.InfluenceMatrix(structs=structs, beams=beams, is_full=flag_full_matrix)  # is_bev=True
+
+    # use naive or RMR sparsification
+    if flag_full_matrix:
+        A = deepcopy(inf_matrix.A)
+        # A = A * np.float32(2 * clinical_criteria.get_prescription() / clinical_criteria.get_num_of_fractions())
+        if "threshold_perc" in vmat_opt_params['opt_parameters']:
+            threshold_perc = vmat_opt_params['opt_parameters']['threshold_perc']
+        else:
+            threshold_perc = 5
+        if "sparsification" in vmat_opt_params['opt_parameters']: # Default is RMR sparsification for more accurate results. It can be changed to Naive
+            sparsification = vmat_opt_params['opt_parameters']['sparsification']
+        else:
+            sparsification = 'Naive'
+        # threshold_abs = 0.0112*2*clinical_criteria.get_prescription() / clinical_criteria.get_num_of_fractions()
+        B = get_sparse_only(A, threshold_perc=threshold_perc, compression=sparsification)
+        # # calculate delta
+        # delta = A.sum(axis=1) - B.sum(axis=1).A1
+        # inf_matrix.opt_voxels_dict['delta'][0] = delta
+        inf_matrix.A = B
+
+    # scale influence matrix to get correct MU for TPS import
+    if "inf_matrix_scale_factor" in vmat_opt_params['opt_parameters']:
+        inf_matrix_scale_factor = vmat_opt_params['opt_parameters']['inf_matrix_scale_factor']
+    else:
+        inf_matrix_scale_factor = 1
+    print("inf_matrix_scale_factor: ", inf_matrix_scale_factor)
+
+    inf_matrix.A = inf_matrix.A * np.float32(inf_matrix_scale_factor)
 
     arcs = Arcs(arcs_dict=arcs_dict, inf_matrix=inf_matrix)
 
     # create a plan using ct, structures, beams and influence matrix. Clinical criteria is optional
-    my_plan = pp.Plan(structs=structs, beams=beams, inf_matrix=inf_matrix, clinical_criteria=clinical_criteria, arcs=arcs)
+    my_plan = pp.Plan(structs=structs,
+                      beams=beams,
+                      inf_matrix=inf_matrix,
+                      clinical_criteria=clinical_criteria,
+                      arcs=arcs)
 
     # generate initial leaf positions using column generation approach else use user defined initial leaf positions
     if vmat_opt_params['opt_parameters']['initial_leaf_pos'].lower() == 'cg':
@@ -107,7 +144,7 @@ def echo_vmat_portpy():
         solutions.append(sol)
         vmat_opt.update_params(step_number=0, sol=sol)
 
-    # Run step 1 and 2 for hiearchical optimization
+    # Run step 1 and 2 for hierarchical optimization
     for i in range(2):
         step_time = time.time()
         if not clinical_criteria.dvh_table.empty:
@@ -146,10 +183,10 @@ def echo_vmat_portpy():
             sol_name = f'sol_step{i + 1}.pkl'
         else:
             sol_name = f'sol_step{i}.pkl'
-        pp.save_optimal_sol(sol=solutions[i], sol_name=sol_name, path=os.path.join('C:\Temp', data.patient_id))
+        pp.save_optimal_sol(sol=solutions[i], sol_name=sol_name, path=os.path.join('C', 'Temp', data.patient_id))
 
     print('saving my_plan..')
-    pp.save_plan(my_plan, 'my_plan.pkl', path=os.path.join('C:\Temp', data.patient_id))
+    pp.save_plan(my_plan, 'my_plan.pkl', path=os.path.join('C', 'Temp', data.patient_id))
 
     # update done
     opt_time = round(time.time() - tic_all, 2)

@@ -34,8 +34,8 @@ class EchoVmatOptimizationColGen(Optimization):
             opt_params = opt_params["col_gen"]  # col_gen is the new opt parameters dictionary for col gen
         else:
             if len(opt_params['steps']) > 1:
-                opt_params["steps"][str(step_num)]["objective_functions"] = self.remove_duplicates(
-                    opt_params["steps"][str(step_num)]["objective_functions"] + opt_params["steps"][str(step_num + 1)]["objective_functions"])
+                opt_params = deepcopy(opt_params)
+                opt_params["steps"][str(step_num)]["objective_functions"] = self.remove_duplicates(opt_params["steps"][str(step_num)]["objective_functions"] + opt_params["steps"][str(step_num + 1)]["objective_functions"])
                 opt_params["steps"][str(step_num)]["constraints"] = self.remove_duplicates(opt_params["steps"][str(step_num)]["constraints"] + opt_params["steps"][str(step_num + 1)]["constraints"])
             # Call the constructor of the base class (Optimization) using super()
             super().__init__(my_plan=my_plan, inf_matrix=inf_matrix,
@@ -64,7 +64,111 @@ class EchoVmatOptimizationColGen(Optimization):
         if delta is None:
             self.delta = np.zeros(self.inf_matrix.A.shape[0])
 
-    def calculate_scores_grad(self, A, A_indices, sol):
+    def calculate_scores_grad(self, A, A_indices, sol, delta=0.0001):
+        """
+        Efficiently calculate scores for unselected beamlets using gradients.
+
+        Parameters:
+            A (csr_matrix): Influence matrix (voxels x beamlets).
+            A_indices (list): List of indices of selected beamlets.
+            sol (dict): Dictionary containing solution intensities ('y').
+
+        Returns:
+            list: List of tuples (beamlet index, score) sorted by score (lower is better).
+        """
+        # Step 1: Reconstruct B matrix from A_indices
+        if not A_indices:  # Empty B
+            self.B = np.empty((A.shape[0], 0))
+
+        # Flatten A_indices and extract columns from A
+        selected_beamlets = [item for sublist in A_indices for item in sublist]
+
+        # Step 2: Compute current dose with selected apertures
+        current_dose = self.B @ sol['y'] if self.B.shape[1] > 0 else np.zeros(A.shape[0])
+
+        # Initialize gradients
+        num_beamlets = A.shape[1]
+        overdose_grad = 0
+        underdose_grad = 0
+        quadratic_grad = 0
+        constraints_grad = 0
+
+        # Objective function gradients
+        obj_funcs = self.obj_funcs
+        structures = self.my_plan.structures
+        inf_matrix = self.my_plan.inf_matrix
+        num_fractions = self.my_plan.get_num_of_fractions()
+
+        for obj in obj_funcs:
+            if obj['type'] == 'quadratic-overdose':
+                struct = obj['structure_name']
+                if struct not in structures.get_structures():
+                    continue
+                voxels = inf_matrix.get_opt_voxels_idx(struct)
+                if len(voxels) == 0:
+                    continue
+                dose_key = self.matching_keys(obj, 'dose_')
+                dose_gy = self.dose_to_gy(dose_key, obj[dose_key]) / num_fractions
+                influence = A[voxels, :]
+                overdose = current_dose[voxels] - dose_gy
+                overdose[overdose < 0] = 0
+                overdose_grad += (2 * obj['weight'] / len(voxels)) * (influence.T @ overdose)
+            elif obj['type'] == 'quadratic-underdose':
+                struct = obj['structure_name']
+                if struct not in structures.get_structures():
+                    continue
+                voxels = inf_matrix.get_opt_voxels_idx(struct)
+                if len(voxels) == 0:
+                    continue
+
+                dose_key = self.matching_keys(obj, 'dose_')
+                dose_gy = self.dose_to_gy(dose_key, obj[dose_key]) / num_fractions
+                influence = A[voxels, :]
+                underdose = current_dose[voxels] - dose_gy
+                underdose[underdose > 0] = 0
+                underdose_grad += (2 * obj['weight'] / len(voxels)) * (influence.T @ underdose)
+            elif obj['type'] == 'quadratic':
+                struct = obj['structure_name']
+                if struct not in structures.get_structures():
+                    continue
+                voxels = inf_matrix.get_opt_voxels_idx(struct)
+                if len(voxels) == 0:
+                    continue
+                influence = A[voxels, :]
+                quadratic_grad += (2 * self.vmat_params['normalize_oar_weights']*obj['weight'] / len(voxels)) * (influence.T @ current_dose[voxels])
+
+        # Constraints gradients
+        constraint_def = self.constraint_def
+        constraints_ind_map = self.constraints_ind_map
+
+        if constraints_ind_map:
+            for constraint in constraint_def:
+
+                if constraint['type'] == 'max_dose':
+                    struct = constraint['parameters']['structure_name']
+                    if struct not in structures.get_structures():
+                        continue
+                    voxels = inf_matrix.get_opt_voxels_idx(struct)
+                    if len(voxels) == 0:
+                        continue
+                    limit_key = self.matching_keys(constraint['constraints'], 'limit')
+                    if limit_key:
+                        limit = self.dose_to_gy(limit_key, constraint['constraints'][limit_key]) / num_fractions
+                        dual = self.constraints[constraints_ind_map['max_dose_' + struct + str(limit)]].dual_value
+                        constraints_grad += np.squeeze(np.asarray(dual * (A[voxels, :])))
+                    # constraints_diff = (
+                    #         np.sum(dual[:, None] * (current_dose[voxels, None] + delta*A[voxels, :] - limit / num_fractions), axis=0)
+                    #         - np.sum(dual * (current_dose[voxels] - limit / num_fractions)))
+                    # faster implemtation. Need to verify it
+                    # perturbed_term = np.einsum('i,ij->j', dual, perturbed_doses[voxels] - limit / num_fractions)
+                    # sol['constraints_grad'] += constraints_diff / delta
+
+        # Combine all gradients to calculate final scores
+        scores = (overdose_grad + underdose_grad + quadratic_grad + constraints_grad)
+        scores = scores/np.max(abs(scores))
+        return scores
+
+    def calculate_scores_grad_new(self, A, A_indices, sol):
         """
         Efficiently calculate scores for unselected beamlets using gradients.
 
@@ -135,7 +239,7 @@ class EchoVmatOptimizationColGen(Optimization):
                 if len(voxels) == 0:
                     continue
                 influence = A[voxels, :]
-                quadratic_grad += (self.vmat_params['normalize_oar_weights'] * 2 * obj['weight'] / len(voxels)) * (influence.T @ current_dose[voxels])
+                quadratic_grad += (2 * self.vmat_params['normalize_oar_weights'] * obj['weight'] / len(voxels)) * (influence.T @ current_dose[voxels])
 
         # Constraints gradients
         constraint_def = self.constraint_def
@@ -156,7 +260,12 @@ class EchoVmatOptimizationColGen(Optimization):
                         limit = self.dose_to_gy(limit_key, constraint['constraints'][limit_key]) / num_fractions
                         dual = self.constraints[constraints_ind_map['max_dose_' + struct + str(limit)]].dual_value
                         constraints_grad += np.squeeze(np.asarray(dual * (A[voxels, :])))
-
+                    # constraints_diff = (
+                    #         np.sum(dual[:, None] * (current_dose[voxels, None] + delta*A[voxels, :] - limit / num_fractions), axis=0)
+                    #         - np.sum(dual * (current_dose[voxels] - limit / num_fractions)))
+                    # faster implemtation. Need to verify it
+                    # perturbed_term = np.einsum('i,ij->j', dual, perturbed_doses[voxels] - limit / num_fractions)
+                    # sol['constraints_grad'] += constraints_diff / delta
                 if constraint['type'] == 'DFO':
                     dfo, oar_voxels = self.get_dfo_parameters(dfo_dict=constraint, is_obj=False)
                     dual = self.constraints[constraints_ind_map['max_dfo']].dual_value
@@ -168,16 +277,141 @@ class EchoVmatOptimizationColGen(Optimization):
         # scores = scores/np.max(abs(scores[unselected_mask]))  # normalize only using unselected beamlets
         return scores
 
-    def select_best_aperture(self, remaining_beam_ids, scores, smooth_delta=0.1, smooth_beta=5, apt_reg_type_cg='row-by-row'):
+    def calculate_scores_fast(self, A, A_indices, sol, delta=1e-3):
         """
+        Efficiently calculate scores for unselected beamlets using NumPy.
 
-        :param remaining_beam_ids: remaining beam ids from which aperture should be selected
-        :param scores: scores for unselected beamlets
-        :param smooth_delta: smoothness weight to modify the score based on leaf positions
-        :param apt_reg_type_cg: strategy to smooth the leafs based on their position. Default to row-by-row. Can be changed to greedy
+        Parameters:
+            A (csr_matrix): Influence matrix (voxels x beamlets).
+            A_indices (list): List of indices of selected beamlets.
+            sol (dict): Dictionary containing solution intensities ('y').
+            delta (float): Small perturbation value.
 
-        :return:best beam id and the beamlets selected for that beam
+        Returns:
+            list: List of tuples (beamlet index, score) sorted by score (lower is better).
         """
+        # Step 1: Reconstruct B matrix from A_indices
+        if not A_indices:  # Empty B
+            self.B = np.empty((A.shape[0], 0))
+
+        # Flatten A_indices and extract columns from A
+        selected_beamlets = [item for sublist in A_indices for item in sublist]
+
+        # Step 2: Compute current dose with selected apertures
+        current_dose = self.B @ sol['y'] if self.B.shape[1] > 0 else np.zeros(A.shape[0])
+
+        # Step 3: Combine selected indices into a set for fast exclusion
+        selected_indices_set = set(selected_beamlets)
+
+        # Step 4: Compute perturbed doses and scores in a vectorized manner
+        unselected_mask = np.array([i not in selected_indices_set for i in range(A.shape[1])])
+        unselected_beamlets = A[:, unselected_mask].toarray()  # Convert sparse matrix to dense
+        perturbed_doses = current_dose[:, None] + delta * unselected_beamlets  # Broadcast addition
+
+        # # Step 6: Compute scores for all unselected beamlets
+        # pres_per_frac = self.my_plan.get_prescription() / self.my_plan.get_num_of_fractions()
+        # ptv_vox = self.inf_matrix.get_opt_voxels_idx('PTV')
+        # p = np.zeros(self.inf_matrix.A.shape[0])
+        # p[ptv_vox] = pres_per_frac
+        # diff_current = current_dose - p
+        # diff_perturbed = perturbed_doses - p[:, None]
+        # scores = (1 / A.shape[0]) * (
+        #         np.sum(self.weights[:, None] * diff_perturbed ** 2, axis=0)
+        #         - np.sum(self.weights * diff_current ** 2)
+        # ) / delta
+        obj_funcs = self.obj_funcs
+        structures = self.my_plan.structures
+        inf_matrix = self.my_plan.inf_matrix
+        num_fractions = self.my_plan.get_num_of_fractions()
+        sol['overdose_grad'] = 0
+        sol['underdose_grad'] = 0
+        sol['quadratic_grad'] = 0
+        sol['constraints_grad'] = 0
+        obj_ind = 0
+        # check if we have smooth objective
+        for i in range(len(obj_funcs)):
+            if obj_funcs[i]['type'] == 'quadratic-overdose':
+                if obj_funcs[i]['structure_name'] in structures.get_structures():
+                    struct = obj_funcs[i]['structure_name']
+                    if len(inf_matrix.get_opt_voxels_idx(
+                            struct)) == 0:  # check if there are any opt voxels for the structure
+                        continue
+                    dose_key = self.matching_keys(obj_funcs[i], 'dose_')
+                    dose_gy = self.dose_to_gy(dose_key, obj_funcs[i][dose_key]) / num_fractions
+                    voxels = inf_matrix.get_opt_voxels_idx(struct)
+                    voxels_cc = inf_matrix.get_opt_voxels_volume_cc(struct)
+                    # new_obj_value = (1 / len(voxels)) * obj_funcs[i]['weight'] * np.sum((np.maximum(0, (new_dose[voxels] - dose_gy)) ** 2))
+                    # old_obj_value = (1 / len(voxels)) * obj_funcs[i]['weight'] * np.sum((np.maximum(0, (current_dose[voxels] - dose_gy)) ** 2))
+                    obj_diff = (1 / len(voxels)) * (
+                                np.sum(obj_funcs[i]['weight'] * np.maximum(0, (perturbed_doses[voxels] - dose_gy)) ** 2, axis=0)
+                                - np.sum(obj_funcs[i]['weight'] * np.maximum(0, (current_dose[voxels] - dose_gy)) ** 2))
+                    sol['overdose_grad'] += obj_diff / delta
+                    obj_ind = obj_ind + 1
+            elif obj_funcs[i]['type'] == 'quadratic-underdose':
+                if obj_funcs[i]['structure_name'] in structures.get_structures():
+                    struct = obj_funcs[i]['structure_name']
+                    if len(inf_matrix.get_opt_voxels_idx(struct)) == 0:
+                        continue
+                    dose_key = self.matching_keys(obj_funcs[i], 'dose_')
+                    dose_gy = self.dose_to_gy(dose_key, obj_funcs[i][dose_key]) / num_fractions
+                    voxels = inf_matrix.get_opt_voxels_idx(struct)
+                    voxels_cc = inf_matrix.get_opt_voxels_volume_cc(struct)
+                    # new_obj_value = (1 / len(voxels) * obj_funcs[i]['weight'] * np.sum(np.maximum(0, (dose_gy - new_dose[voxels])) ** 2))
+                    # old_obj_value = (1 / len(voxels) * obj_funcs[i]['weight'] * np.sum(np.maximum(0, (dose_gy - current_dose[voxels])) ** 2))
+                    # sol['underdose_grad'] += (new_obj_value - old_obj_value) / delta
+                    obj_diff = (1 / len(voxels)) * (
+                            np.sum(obj_funcs[i]['weight'] * np.maximum(0, (dose_gy - perturbed_doses[voxels])) ** 2, axis=0)
+                            - np.sum(obj_funcs[i]['weight'] * np.maximum(0, (dose_gy - current_dose[voxels])) ** 2))
+                    sol['underdose_grad'] += obj_diff / delta
+                    obj_ind = obj_ind + 1
+            elif obj_funcs[i]['type'] == 'quadratic':
+                if obj_funcs[i]['structure_name'] in structures.get_structures():
+                    struct = obj_funcs[i]['structure_name']
+                    if len(inf_matrix.get_opt_voxels_idx(struct)) == 0:
+                        continue
+                    voxels = inf_matrix.get_opt_voxels_idx(struct)
+                    voxels_cc = inf_matrix.get_opt_voxels_volume_cc(struct)
+                    # new_obj_value = (1 / len(voxels)) * obj_funcs[i]['weight'] * np.sum((new_dose[voxels] ** 2))
+                    # old_obj_value = (1 / len(voxels)) * obj_funcs[i]['weight'] * np.sum((current_dose[voxels] ** 2))
+                    # sol['quadratic_grad'] += (new_obj_value - old_obj_value) / delta
+                    obj_diff = (1 / len(voxels)) * (
+                            np.sum(obj_funcs[i]['weight'] * (perturbed_doses[voxels] ** 2), axis=0)
+                            - np.sum(obj_funcs[i]['weight'] * (current_dose[voxels] ** 2)))
+                    sol['quadratic_grad'] += obj_diff / delta
+                    obj_ind = obj_ind + 1
+
+        # constraints
+        constraint_def = self.constraint_def
+        constraints_ind_map = self.constraints_ind_map
+        if constraints_ind_map:
+            # extract dual values of the constraints
+            for i in range(len(constraint_def)):
+                if constraint_def[i]['type'] == 'max_dose':
+                    limit_key = self.matching_keys(constraint_def[i]['constraints'], 'limit')
+                    if limit_key:
+                        limit = self.dose_to_gy(limit_key, constraint_def[i]['constraints'][limit_key])
+                        org = constraint_def[i]['parameters']['structure_name']
+                        if org in self.my_plan.structures.get_structures():
+                            if len(inf_matrix.get_opt_voxels_idx(org)) == 0:
+                                continue
+                            voxels = inf_matrix.get_opt_voxels_idx(org)
+                            if len(self.constraints) > 0:
+                                dual = self.constraints[constraints_ind_map['max_dose_' + org + str(limit / num_fractions)]].dual_value
+                                constraints_diff = (
+                                        np.sum(dual[:, None] * (perturbed_doses[voxels] - limit / num_fractions), axis=0)
+                                        - np.sum(dual * (current_dose[voxels] - limit / num_fractions)))
+                                # faster implemtation. Need to verify it
+                                # perturbed_term = np.einsum('i,ij->j', dual, perturbed_doses[voxels] - limit / num_fractions)
+                                sol['constraints_grad'] += constraints_diff / delta
+        scores = sol['overdose_grad'] + sol['underdose_grad'] + sol['quadratic_grad'] + sol['constraints_grad']
+        # scores.append((i, score))
+        # Step 7: Map scores to beamlet indices
+        unselected_indices = np.where(unselected_mask)[0]
+        scores_list = list(zip(unselected_indices, scores))
+
+        return scores_list
+
+    def select_best_aperture_smooth_greedy(self, remaining_beam_ids, scores, smooth_delta=0.1, smooth_beta=5, apt_reg_type_cg='row-by-row'):
         aperture_score = {}
         selected_beamlets = {}
         selected_leafs = {}
@@ -187,10 +421,15 @@ class EchoVmatOptimizationColGen(Optimization):
             score_dict = {index: score for index, score in enumerate(scores)}
         else:
             score_dict = {index: score for index, score in scores}
+
+        # Count how many control points have been selected from each arc
+        arc_selection_count = {arc['arc_id']: arc['num_beams'] for arc in self.arcs.arcs_dict['arcs']}
         # score_dict_orig = score_dict.copy()
         for arc in self.arcs.arcs_dict['arcs']:
             for beam in arc['vmat_opt']:
                 if beam['beam_id'] in remaining_beam_ids:
+                    # Update count of selected control points for this arc
+                    arc_selection_count[arc['arc_id']] -= 1
                     cumulative_score = 0
                     selected_beamlets[beam['beam_id']] = []
                     selected_leafs[beam['beam_id']] = [[] for _ in range(beam['num_rows'])]
@@ -210,13 +449,14 @@ class EchoVmatOptimizationColGen(Optimization):
                             r_best += 1
                             row = beam['reduced_2d_grid'][r_best]
 
+
                         # scores_matrix = np.vectorize(lambda x: float(score_dict.get(x, 0)))(beam['reduced_2d_grid'])
                         # Step 0: Initialization
-                        c1, c2 = np.argwhere(row >= 0)[0][0], np.argwhere(row >= 0)[0][0] - 1  # start with one index less for c2
+                        c1, c2 = np.argwhere(row >= 0)[0][0], np.argwhere(row >= 0)[0][0]-1 # start with one index less for c2
                         c1_opt, c2_opt = c1, c2 + 1
                         v, v_bar, v_star = 0, 0, 0  # Initialize v, v_bar, and v_star
 
-                        # Number of beamlets in the row
+                        # End beamlet index in the row
                         n = np.argwhere(row >= 0)[-1][0]
 
                         # Step 1: Iterate over possible right leaf positions
@@ -227,7 +467,7 @@ class EchoVmatOptimizationColGen(Optimization):
                             # Step 2: Update v_bar if necessary
                             if v > v_bar:
                                 v_bar = v
-                                c1 = c2 + 2  # Update left position
+                                c1 = c2+2  # Update left position
 
                             elif v - v_bar < v_star:  # Update v_star if the reduced cost improves
                                 v_star = v - v_bar
@@ -245,8 +485,11 @@ class EchoVmatOptimizationColGen(Optimization):
 
                         # remove the best row from configuration
                         if apt_reg_type_cg == 'greedy':
-
-                            selected_leafs[beam['beam_id']][remaining_rows[r_best]] = [c1_opt - 1, c2_opt + 1]  # vmat scp format
+                            # # change back scores of the unselected beamlets to original after finding best row
+                            # for beamlet in score_dict:
+                            #     if beamlet not in selected_beamlets[beam['beam_id']]:
+                            #         score_dict[beamlet] = score_dict_orig[beamlet]
+                            selected_leafs[beam['beam_id']][remaining_rows[r_best]] = [c1_opt - 1, c2_opt + 1] # vmat scp format
                             processed_rows.append(remaining_rows[r_best])
                             del remaining_rows[r_best]
                         else:
@@ -274,15 +517,15 @@ class EchoVmatOptimizationColGen(Optimization):
                                             score_dict[beamlet] += smooth_delta * row_discount * abs(c - prev_c2_opt)  # decrease score
                                         elif prev_c1_opt < c < prev_c2_opt:  # right of previous left
                                             if (c - prev_c1_opt) < (prev_c2_opt - c):  # -ve penalize only beamlets if they are in optimal configuration
-                                                score_dict[beamlet] += -1 * smooth_delta * row_discount * abs(prev_c1_opt - c)  # increase score (-ve of distance)
+                                                score_dict[beamlet] += -1*smooth_delta * row_discount * abs(prev_c1_opt - c)  # increase score (-ve of distance)
                                             if (c - prev_c1_opt) > (prev_c2_opt - c):  # -ve penalize only beamlets if they are in optimal configuration
-                                                score_dict[beamlet] += -1 * smooth_delta * row_discount * abs(c - prev_c2_opt)  # increase score (-ve of distance)
+                                                score_dict[beamlet] += -1*smooth_delta * row_discount * abs(c - prev_c2_opt)  # increase score (-ve of distance)
 
                             # beam['scores_matrix'] = np.vectorize(lambda x: float(score_dict.get(x, 0)))(beam['reduced_2d_grid'])
                         else:
                             # Add penalty for deviations from the upper row
                             # Define the boundary window size. It is half of BEV length of open aperture row
-                            if r_best < beam['num_rows'] - 1:
+                            if r_best < beam['num_rows']-1:
                                 row = beam['reduced_2d_grid'][r_best + 1]
                                 prev_c1_opt = selected_leafs[beam['beam_id']][r_best][0] + 1
                                 prev_c2_opt = selected_leafs[beam['beam_id']][r_best][1] - 1
@@ -295,12 +538,49 @@ class EchoVmatOptimizationColGen(Optimization):
                                             score_dict[beamlet] += smooth_delta * abs(c - prev_c2_opt)  # decrease score
                                         elif prev_c1_opt < c < prev_c2_opt:  # right of previous left
                                             if (c - prev_c1_opt) < (prev_c2_opt - c):  # -ve penalize only beamlets if they are in optimal configuration
-                                                score_dict[beamlet] += -1 * smooth_delta * abs(prev_c1_opt - c)  # increase score (-ve of distance)
+                                                score_dict[beamlet] += -1*smooth_delta * abs(prev_c1_opt - c)  # increase score (-ve of distance)
                                             if (c - prev_c1_opt) > (prev_c2_opt - c):  # -ve penalize only beamlets if they are in optimal configuration
-                                                score_dict[beamlet] += -1 * smooth_delta * abs(c - prev_c2_opt)  # increase score (-ve of distance)
+                                                score_dict[beamlet] += -1*smooth_delta * abs(c - prev_c2_opt)  # increase score (-ve of distance)
                         aperture_score[beam['beam_id']] = cumulative_score
         # best beam id
         # best_beam_id = min(aperture_score, key=aperture_score.get)
+        if 'update_balanced_arc_score' in self.vmat_params:
+            if self.vmat_params['update_balanced_arc_score']:
+                # Update scores based on arc balance factor
+                if 'update_balanced_arc_score_p' in self.vmat_params:
+                    p  = self.vmat_params['update_balanced_arc_score_p']
+                else:
+                    p = -1
+                # epsilon = 1e-3  # Small regularization term to avoid zero contribution
+                # M = max(arc_selection_count.values()) + epsilon # added epsilon to handle arcs with 0
+                total_arcs = len(arc_selection_count)
+                if total_arcs > 1:
+                    # # Ensure all arcs have at least one selected beam when only one arc has a selection
+                    # if sum(count > 0 for count in arc_selection_count.values()) == 1:
+                    #     for arc_id in arc_selection_count.keys():
+                    #         if arc_selection_count[arc_id] == 0:
+                    #             arc_selection_count[arc_id] = 1  # Add a dummy beam count to other arcs
+                    arc_scores = {}
+                    arc_weights = {arc_id: (1+count) ** (1 / p) for arc_id, count in
+                                   arc_selection_count.items()}  # Compute m^(1/p) for each arc
+                    sum_arc_weights = sum(arc_weights.values())  # Sum of all arc weights
+
+
+                    for arc_id in arc_selection_count.keys():
+                        arc_scores[arc_id] = arc_weights[arc_id] / sum_arc_weights if sum_arc_weights > 0 else 0.5 # lower arc count should get higher weight
+                    print(arc_scores)
+
+                    # Apply arc-based score adjustment
+                    for arc in self.arcs.arcs_dict['arcs']:
+                        for beam in arc['vmat_opt']:
+                            if beam['beam_id'] in remaining_beam_ids:
+                                for r in range(beam['num_rows']):
+                                    row = beam['reduced_2d_grid'][r]
+                                    for beamlet in row:
+                                        if beamlet >= 0:
+                                            score_dict[beamlet] *= arc_scores[arc['arc_id']] # update scores of each remaining beamlet
+                                aperture_score[beam['beam_id']] = aperture_score[beam['beam_id']] * arc_scores[arc['arc_id']] # update cummulative score
+
         if 'num_select_apertures' in self.vmat_params:
             num_select_apertures = self.vmat_params['num_select_apertures']
         else:
@@ -320,17 +600,16 @@ class EchoVmatOptimizationColGen(Optimization):
                     beam['leaf_pos_left'] = [selected_leafs[beam['beam_id']][i][0] for i in range(len(selected_leafs[beam['beam_id']]))]
                     beam['leaf_pos_right'] = [selected_leafs[beam['beam_id']][i][1] for i in range(len(selected_leafs[beam['beam_id']]))]
                     # beam['apt_sol_gen'] = np.isin(beam['reduced_2d_grid'], selected_beamlets[beam['beam_id']]).astype(int)
-                    beam['scores_matrix'] = np.vectorize(lambda x: float(score_dict.get(x, 0)))(beam['reduced_2d_grid'])
-                    # beam['aperture_score'] = aperture_score[beam['beam_id']]
+                    # beam['scores_matrix'] = np.vectorize(lambda x: float(score_dict.get(x, 0)))(beam['reduced_2d_grid'])
+                if beam['beam_id'] in remaining_beam_ids:
+                    if 'output_score_matrix' in self.vmat_params:
+                        if self.vmat_params['output_score_matrix']:
+                            beam['apt_sol_gen'] = np.isin(beam['reduced_2d_grid'], selected_beamlets[beam['beam_id']]).astype(int)
+                            beam['scores_matrix'] = np.vectorize(lambda x: float(score_dict.get(x, 0)))(beam['reduced_2d_grid'])
+                    beam['aperture_score'] = aperture_score[beam['beam_id']]
         return top_beam_ids, [selected_beamlets[b_id] for b_id in top_beam_ids]
 
     def solve_rmp(self, *args, **kwargs):
-        """
-        solve restricted master problem to optimize beam intensities
-        :param args: solver arguments
-        :param kwargs: solver key arguments
-        :return: solution. dictionary containing optimal beam intensities and objective value
-        """
         my_plan = self.my_plan
         inf_matrix = self.inf_matrix
         opt_params = self.opt_params
@@ -341,9 +620,12 @@ class EchoVmatOptimizationColGen(Optimization):
         A = inf_matrix.A
         B = self.B
         num_fractions = clinical_criteria.get_num_of_fractions()
+        ptv_vox = inf_matrix.get_opt_voxels_idx('PTV')
+        p = np.zeros((A.shape[0]))
+        p[ptv_vox] = clinical_criteria.get_prescription() / num_fractions
 
         if np.all(self.B == 0):
-            return {'y': np.zeros(self.B.shape[1]), 'obj_value': 0}
+            return {'y': np.zeros(self.B.shape[1]), 'obj_value':0}
 
         st = inf_matrix
         y = cp.Variable(self.B.shape[1], pos=True)
@@ -352,6 +634,9 @@ class EchoVmatOptimizationColGen(Optimization):
         self.constraints = []
         obj = self.obj
         constraints = self.constraints
+
+
+        # obj += [(1 / B.shape[0]) * cp.sum_squares(cp.multiply(np.sqrt(self.weights), B @ y - p))]
         for i in range(len(obj_funcs)):
             if obj_funcs[i]['type'] == 'quadratic-overdose':
                 if obj_funcs[i]['structure_name'] in my_plan.structures.get_structures():
@@ -421,21 +706,19 @@ class EchoVmatOptimizationColGen(Optimization):
         print("Optimal value: %s" % problem.value)
 
         return sol
-
     def run_col_gen_algo(self, *args, **kwargs):
-
+        # running col gen algorithm:
+        selected_apertures = []
         # Initial parameters
         A_indices = []  # Indices of selected beamlets in A
-        # preprocessing step to store BEV leaf position
         self.arcs.get_initial_leaf_pos(initial_leaf_pos='BEV')
-        # get apt reg metric for BEV
         apt_reg_obj = get_apt_reg_metric(my_plan=self.my_plan)
         print('####apr_reg_obj BEV: {} ####'.format(apt_reg_obj))
         arcs = self.arcs.arcs_dict['arcs']
-
+        # total_beams = sum([arc['num_beams'] for arc in arcs])
         self.B = np.empty((self.inf_matrix.A.shape[0], 0))  # Start with an empty B matrix
         A = self.inf_matrix.A
-
+        # control_points = np.sum([arc['num_beams'] for arc in self.arcs.arcs_dict['arcs']])
         # get all beam ids from all arcs
         remaining_beam_ids = [beam['beam_id'] for arc in self.arcs.arcs_dict['arcs'] for beam in arc['vmat_opt']]
         map_beam_id_to_index = {
@@ -445,9 +728,12 @@ class EchoVmatOptimizationColGen(Optimization):
             )
         }
         B_indices = []
-        # initialize sol to 0
         sol = {'y': np.zeros(0)}
-
+        # ptv_vox = self.inf_matrix.get_opt_voxels_idx('PTV')
+        # weights = np.ones(A.shape[0])
+        # weights[ptv_vox] = 100
+        # weights[~ptv_vox] = 5
+        # self.weights = weights
         obj_funcs = self.opt_params['objective_functions'] if 'objective_functions' in self.opt_params else []
         opt_params_constraints = self.opt_params['constraints'] if 'constraints' in self.opt_params else []
         self.obj_funcs = obj_funcs
@@ -464,9 +750,9 @@ class EchoVmatOptimizationColGen(Optimization):
                 else:
                     constraint_def += [opt_constraint]
         self.constraint_def = constraint_def
-
+        # Turn off constraints
+        # self.constraint_def = []
         convergence = []
-        # smoothness weight to modify the score. Default is 0
         if 'smooth_delta' in self.vmat_params:
             smooth_delta = self.vmat_params['smooth_delta']
         else:
@@ -485,12 +771,19 @@ class EchoVmatOptimizationColGen(Optimization):
         # run col generation
         while len(remaining_beam_ids) > 0:
 
-            # Calculate scores for unselected beamlets using gradient information
-            scores = self.calculate_scores_grad(A, A_indices, sol)
-            # select best aperture
-            top_beam_ids, beam_beamlets_list = self.select_best_aperture(remaining_beam_ids, scores, smooth_delta=smooth_delta, smooth_beta=smooth_beta, apt_reg_type_cg=apt_reg_type_cg)
+            # Calculate scores for unselected beamlets
+            # scores = self.calculate_scores_fast(A, A_indices, sol, delta=delta)
+            scores = self.calculate_scores_grad_new(A, A_indices, sol)
 
-            # create new influence matrix B containing # of cols equals to selected beams
+            # top_beam_ids, beam_beamlets_list = self.select_best_aperture_smooth(remaining_beam_ids, scores, smooth_delta=smooth_delta)
+            # top_beam_ids, beam_beamlets_list = self.select_best_aperture_smooth_heuristic_2(remaining_beam_ids, scores, smooth_delta=smooth_delta)
+            # top_beam_ids, beam_beamlets_list = self.select_best_aperture_new_smooth_heuristic(remaining_beam_ids, scores, smooth_delta=smooth_delta)
+            top_beam_ids, beam_beamlets_list = self.select_best_aperture_smooth_greedy(remaining_beam_ids, scores, smooth_delta=smooth_delta, smooth_beta=smooth_beta, apt_reg_type_cg=apt_reg_type_cg)
+            # # Update B matrix with new aperture
+            # A_indices.append(open_beamlet_indices)
+            # B_indices.append(map_beam_id_to_index[best_beam_id])
+            # self.B = np.column_stack([self.B, A[:, open_beamlet_indices].sum(axis=1).A1])
+            # Update B matrix with each new aperture
             for beam_id, open_beamlet_indices in zip(top_beam_ids, beam_beamlets_list):
                 A_indices.append(open_beamlet_indices)
                 B_indices.append(map_beam_id_to_index[beam_id])
@@ -498,7 +791,7 @@ class EchoVmatOptimizationColGen(Optimization):
                 self.B = np.column_stack([self.B, A[:, open_beamlet_indices].sum(axis=1).A1])
             # Solve RMP
             sol = self.solve_rmp(*args, **kwargs)  # Use only selected beamlets
-            # # save few statistics to convergence list
+            # # save statistics to convergence list
             convergence.append([top_beam_ids[0],
                                 get_apt_reg_metric(self.my_plan, beam_ids=top_beam_ids),
                                 sol['obj_value']])
@@ -506,15 +799,18 @@ class EchoVmatOptimizationColGen(Optimization):
             # remaining_beam_ids.remove(best_beam_id)
             remaining_beam_ids = list(set(remaining_beam_ids) - set(top_beam_ids))
 
+
         # calculate beamlet intensity for all the control points as 1d vector
         x = np.zeros(A.shape[1])
         for b in range(len(B_indices)):
             x[A_indices[b]] = sol['y'][b]
         sol['optimal_intensity'] = x
-
+        # cache these leaf positions to solution
+        sol['arcs'] = self.arcs.arcs_dict['arcs']
         # Col Gen Convergence
-        # df = pd.DataFrame(convergence)
-        # print(df)
+        import pandas as pd
+        df = pd.DataFrame(convergence)
+        print(df.to_string())
 
         # get smoothness function value using leaf positions in arcs
         apt_reg_obj = get_apt_reg_metric(my_plan=self.my_plan)
@@ -522,6 +818,7 @@ class EchoVmatOptimizationColGen(Optimization):
         sol['apt_reg_obj'] = apt_reg_obj
 
         return sol
+
 
     def get_dfo_interior(self, struct_name: str = 'GTV', min_dose: float = None, max_dose: float = None, pres: float = None):
 
@@ -595,10 +892,10 @@ class EchoVmatOptimizationColGen(Optimization):
         dosemax_key = self.matching_keys(obj, 'dosemax')
         dose_gy = None
         if dose_key:
-            dose_gy = self.dose_to_gy(dose_key, obj[dose_key]) / num_fractions
+            dose_gy = self.dose_to_gy(dose_key, obj[dose_key])/num_fractions
         elif dosemax_key:
-            dosemin_gy = self.dose_to_gy(dosemin_key, obj[dosemin_key]) / num_fractions
-            dosemax_gy = self.dose_to_gy(dosemax_key, obj[dosemax_key]) / num_fractions
+            dosemin_gy = self.dose_to_gy(dosemin_key, obj[dosemin_key])/num_fractions
+            dosemax_gy = self.dose_to_gy(dosemax_key, obj[dosemax_key])/num_fractions
             dose_gy = self.get_dfo_interior(struct_name=struct, min_dose=dosemin_gy, max_dose=dosemax_gy)
         return dose_gy
 
@@ -619,8 +916,8 @@ class EchoVmatOptimizationColGen(Optimization):
             weight_interpolate = interp1d(distance, weight, kind='next')
         dfo_interpolate = interp1d(distance, max_dose, kind='next')
         target_voxels = self.inf_matrix.get_opt_voxels_idx(struct_name)
-        all_vox = np.arange(self.inf_matrix.A.shape[0])
-        oar_voxels = all_vox[~np.isin(np.arange(self.inf_matrix.A.shape[0]), target_voxels)]
+        all_vox = self.my_plan.inf_matrix.get_opt_voxels_idx('BODY')
+        oar_voxels = np.setdiff1d(all_vox, target_voxels)
         vox_coord_xyz_mm = self.inf_matrix.opt_voxels_dict['voxel_coordinate_XYZ_mm'][0]
 
         if 'distance_from_structure_mm' not in self.inf_matrix.opt_voxels_dict:
@@ -628,17 +925,16 @@ class EchoVmatOptimizationColGen(Optimization):
         if struct_name not in self.inf_matrix.opt_voxels_dict['distance_from_structure_mm']:
             print('calculating distance of normal tissue voxels from target for DFO constraints. This step may take some time..')
             start = time.time()
-            a, _ = cKDTree(vox_coord_xyz_mm[target_voxels, :]).query(vox_coord_xyz_mm[oar_voxels, :], 1)
+            dist_from_structure, _ = cKDTree(vox_coord_xyz_mm[target_voxels, :]).query(vox_coord_xyz_mm[oar_voxels, :], 1)
             # a = spatial.distance.cdist(, vox_coord_xyz_mm[PTV, :]).min(axis=1)
             print('Time for calc distance {}'.format(time.time() - start))
-            dist_from_structure = np.zeros_like(all_vox, dtype=float)
-            dist_from_structure[oar_voxels] = a
-            self.inf_matrix.opt_voxels_dict['distance_from_structure_mm'] = {struct_name: dist_from_structure}
+            # dist_from_structure = np.zeros_like(all_vox, dtype=float)
+            # dist_from_structure[oar_voxels] = a
+            self.inf_matrix.opt_voxels_dict['distance_from_structure_mm'][struct_name] = dist_from_structure
         if not is_obj:
-            return dfo_interpolate(self.inf_matrix.opt_voxels_dict['distance_from_structure_mm'][struct_name][oar_voxels]), oar_voxels
+            return dfo_interpolate(self.inf_matrix.opt_voxels_dict['distance_from_structure_mm'][struct_name]), oar_voxels
         else:
-            return dfo_interpolate(self.inf_matrix.opt_voxels_dict['distance_from_structure_mm'][struct_name][oar_voxels]), weight_interpolate(
-                self.inf_matrix.opt_voxels_dict['distance_from_structure_mm'][struct_name][oar_voxels]), oar_voxels
+            return dfo_interpolate(self.inf_matrix.opt_voxels_dict['distance_from_structure_mm'][struct_name]), weight_interpolate(self.inf_matrix.opt_voxels_dict['distance_from_structure_mm'][struct_name]), oar_voxels
 
     def remove_duplicates(self, dict_list):
         seen = set()

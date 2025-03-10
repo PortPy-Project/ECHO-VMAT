@@ -1,1 +1,2 @@
 portpy>=1.0.5
+scikit-learn>=1.6.1
