@@ -238,7 +238,7 @@
     "step1_oar_dose": 1,
     "step2_oar_weight": 1,
     "step2_oar_weight_lb": 1,
-    "step2_oar_weight_ub": 5,
+    "step2_oar_weight_ub": 10,
     "d_od_u": 0,
     "flag_sampling": 0,
     "end_of_step1": 0,
@@ -259,7 +259,7 @@
       0.0005
     ],
     "alpha2": 0.7,
-    "smooth_delta": 0.015,
+    "smooth_delta": 0.01,
     "alpha": 0,
     "relax_factor": 0.1,
     "update_balanced_arc_score": 1,
