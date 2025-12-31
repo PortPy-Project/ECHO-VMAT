@@ -473,7 +473,9 @@ class EchoVmatOptimization(Optimization):
         return sol
 
     def create_cvxpy_actual_problem(self):
-
+        """
+        Construct actual problem for optimizing MU
+        """
         # Construct actual solution correction problem
 
         # unpack data
@@ -558,7 +560,7 @@ class EchoVmatOptimization(Optimization):
                 apt_reg_m = self.cvxpy_params['apt_reg_m']
                 card_ar = self.cvxpy_params['card_ar']
                 weight = obj_funcs[i]['weight'] * pres_per_fraction
-                obj_actual += [weight / card_ar * (cp.sum_squares(apt_reg_m @ cp.multiply(fixed_leaf_pos_l, beam_mu[map_int_v]))) + cp.sum(
+                obj_actual += [weight / card_ar * (cp.sum_squares(apt_reg_m @ cp.multiply(fixed_leaf_pos_l, beam_mu[map_int_v])) +
                     cp.sum_squares(apt_reg_m @ cp.multiply(fixed_leaf_pos_r, beam_mu[map_int_v])))]
                 print('Actual objective function type: {}, weight:{} created..'.format(obj_funcs[i]['type'],
                                                                                 obj_funcs[i]['weight']))
@@ -566,7 +568,7 @@ class EchoVmatOptimization(Optimization):
                 apt_sim_m = self.cvxpy_params['apt_sim_m']
                 card_as = self.cvxpy_params['card_as']
                 weight = obj_funcs[i]['weight'] * pres_per_fraction
-                obj_actual += [weight / card_as * (cp.sum_squares(apt_sim_m @ cp.multiply(fixed_leaf_pos_l, beam_mu[map_int_v]))) + cp.sum(
+                obj_actual += [weight / card_as * (cp.sum_squares(apt_sim_m @ cp.multiply(fixed_leaf_pos_l, beam_mu[map_int_v])) +
                     cp.sum_squares(apt_sim_m @ cp.multiply(fixed_leaf_pos_r, beam_mu[map_int_v])))]
                 print('Actual objective function type: {}, weight:{} created..'.format(obj_funcs[i]['type'],
                                                                                 obj_funcs[i]['weight']))
@@ -739,8 +741,12 @@ class EchoVmatOptimization(Optimization):
         return prescription
 
     def create_interior_and_boundary_inf_matrix(self):
+        """
+        Create influence matrix based on interior and boundary beamlets
 
-        print("Modifying influence matrix for boundary and interior beamlets")
+        :return: inf_int, inf_bound_l, inf_bound_r
+        """
+        print("Modifying influence matrix for boundary and interior beamlets. This process may take sometime..")
         A = self.inf_matrix.A
         arcs = self.arcs.arcs_dict['arcs']
         total_beams = sum([arc['num_beams'] for arc in arcs])
@@ -1668,7 +1674,10 @@ class EchoVmatOptimization(Optimization):
                 If return_problem set to true, returns cvxpy problem instance
 
                 :Example
-                        dict = {"optimal_fluence": [..],
+                        dict = {"act_dose_v": [..],
+                        "int_v":[..],
+                        "bound_v_l":[..],
+                        "bound_v_r":[..],
                         "inf_matrix": my_plan.inf_marix
                         }
 

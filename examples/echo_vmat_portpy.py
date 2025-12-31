@@ -98,6 +98,9 @@ def echo_vmat_portpy():
 
     arcs = Arcs(arcs_dict=arcs_dict, inf_matrix=inf_matrix)
 
+    if 'voxel_coordinate_XYZ_mm' not in inf_matrix.opt_voxels_dict:
+        inf_matrix.opt_voxels_dict['voxel_coordinate_XYZ_mm'] = [None]
+        inf_matrix.opt_voxels_dict['voxel_coordinate_XYZ_mm'][0] = inf_matrix.get_voxel_coordinates()
     # create a plan using ct, structures, beams and influence matrix. Clinical criteria is optional
     my_plan = pp.Plan(structs=structs,
                       beams=beams,
